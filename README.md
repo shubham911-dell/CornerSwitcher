@@ -40,3 +40,7 @@ Edit values at the top of the script:
 
 - **Start** → Double-click the script
 - **Stop** → Right-click the green `H` tray icon → Exit
+
+   **OR**
+  
+    → Click `ctrl` `shift` `esc` and search for <ins>***AutoHotKey 64-bit***</ins> and ****Right click**** on it and click ****End task****
