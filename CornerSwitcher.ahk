@@ -1,4 +1,4 @@
-﻿#Requires AutoHotkey v2.0
+#Requires AutoHotkey v2.0
 #SingleInstance Force
 SendMode "Event"
 SetKeyDelay 0, 20
@@ -292,6 +292,10 @@ InstantSwitchRecent() {
     }
     return
 }
+; ---------- Fix: Let Ctrl work normally ----------
+*Ctrl::SendEvent "{Ctrl down}"
+*Ctrl Up::SendEvent "{Ctrl up}"
+
 
 ; ---------- Safety ----------
 OnExit Cleanup
