@@ -46,14 +46,22 @@ global TL_altTabActive := false
 global BL_inside := false
 global lastStepTick := 0
 
+; Added state: track whether first scroll (open-only) already happened
+global TL_firstScrollDone := false
+
+; Click origin state (prevents stray triggers)
+global LB_DownInTL := false, LB_DownInBL := false, LB_SentDown := false
+global RB_DownInTL := false, RB_SentDown := false
+
 ; ---------- Helpers ----------
 IsInTopLeft() {
     MouseGetPos &mx, &my
     return (mx <= lScr + marginTL && my <= tScr + marginTL)
 }
+; Use SCREEN edges for BL corner (fixes left-edge false positives)
 IsInBottomLeft() {
     MouseGetPos &mx, &my
-    return (mx <= lWork + marginBL && my >= bWork - marginBL)
+    return (mx <= lScr + marginBL && my >= bScr - marginBL)
 }
 CanStep() {
     global lastStepTick, stepCooldownMs
@@ -120,10 +128,10 @@ ShowTLHover(show := true, active := false) {
     }
 }
 
-; BL hover indicator
+; BL hover indicator (align to SCREEN bottom-left)
 global blHover := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x20")
 blHover.BackColor := highlightBLColor
-blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bWork - marginBL, marginBL, marginBL))
+blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bScr - marginBL, marginBL, marginBL))
 try WinSetTransparent highlightBLAlpha, "ahk_id " . blHover.Hwnd
 blHover.Hide()
 
@@ -133,7 +141,7 @@ ShowBLHover(show := true) {
     if (show) {
         blHover.BackColor := highlightBLColor
         try WinSetTransparent highlightBLAlpha, "ahk_id " . blHover.Hwnd
-        blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bWork - marginBL, marginBL, marginBL))
+        blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bScr - marginBL, marginBL, marginBL))
     } else {
         if WinExist("ahk_id " . blHover.Hwnd)
             blHover.Hide()
@@ -144,7 +152,7 @@ ShowBLHover(show := true) {
 SetTimer CornerLoop, pollMs
 
 CornerLoop() {
-    global TL_inside, TL_altTabActive, BL_inside
+    global TL_inside, TL_altTabActive, BL_inside, TL_firstScrollDone
 
     ; TL behavior: hover does nothing (only shows indicator)
     curTL := IsInTopLeft()
@@ -156,6 +164,7 @@ CornerLoop() {
         TL_inside := false
         ShowTLHover(false, false)
         EndAltTabIfActive()
+        TL_firstScrollDone := false   ; reset when leaving corner
     } else if (curTL) {
         ShowTLGuard()
         ShowTLHover(true, TL_altTabActive)
@@ -201,12 +210,13 @@ StepLeft() {
     Sleep 10
 }
 EndAltTabIfActive() {
-    global TL_altTabActive
+    global TL_altTabActive, TL_firstScrollDone
     if (TL_altTabActive) {
         SendEvent "{Blind}{Alt up}"
         TL_altTabActive := false
         ShowTLHover(true, false)
     }
+    TL_firstScrollDone := false
 }
 
 ; ---------- Window control ----------
@@ -231,71 +241,101 @@ InstantSwitchRecent() {
 
 ; ---------- Global mouse handlers (wildcard: work even while Alt is held) ----------
 ; Using wildcard (*) ensures scroll still triggers when Alt-Tab UI is visible
-*WheelDown::
-{
+*WheelDown:: {
+    global TL_firstScrollDone, TL_altTabActive
     if (IsInTopLeft()) {
-        OpenSwitcherIfNeeded()
-        if (CanStep())
+        if (!TL_altTabActive) {
+            ; first scroll -> just open the switcher (no stepping)
+            OpenSwitcherIfNeeded()
+            TL_firstScrollDone := true
+        } else if (!TL_firstScrollDone) {
+            ; if somehow switcher is active but first-scroll flag not set, set it and do not step
+            TL_firstScrollDone := true
+        } else if (CanStep()) {
             StepLeft()
+        }
     } else {
         SendEvent "{WheelDown}"
     }
     return
 }
-*WheelUp::
-{
+*WheelUp:: {
+    global TL_firstScrollDone, TL_altTabActive
     if (IsInTopLeft()) {
-        OpenSwitcherIfNeeded()
-        if (CanStep())
+        if (!TL_altTabActive) {
+            ; first scroll -> just open the switcher (no stepping)
+            OpenSwitcherIfNeeded()
+            TL_firstScrollDone := true
+        } else if (!TL_firstScrollDone) {
+            ; set first-scroll consumed, do not step
+            TL_firstScrollDone := true
+        } else if (CanStep()) {
             StepRight()
+        }
     } else {
         SendEvent "{WheelUp}"
     }
     return
 }
 
-; Left click
-*LButton::
-{
-    if (!IsInTopLeft() && !IsInBottomLeft())
+; Left click (gate on where the click STARTED to avoid accidental triggers)
+*LButton:: {
+    global LB_DownInTL, LB_DownInBL, LB_SentDown
+    LB_DownInTL := IsInTopLeft()
+    LB_DownInBL := IsInBottomLeft()
+    if (!LB_DownInTL && !LB_DownInBL) {
         SendEvent "{LButton down}"
+        LB_SentDown := true
+    } else {
+        LB_SentDown := false
+    }
     return
 }
-*LButton Up::
-{
-    if (IsInTopLeft()) {
+*LButton Up:: {
+    global LB_DownInTL, LB_DownInBL, LB_SentDown
+    if (LB_DownInTL && IsInTopLeft()) {
         EndAltTabIfActive()
         InstantSwitchRecent()
-    } else if (IsInBottomLeft()) {
+    } else if (LB_DownInBL && IsInBottomLeft()) {
         EndAltTabIfActive()
-        SendEvent "#{Tab}"   ; Task View
-    } else {
+        SendEvent "#{Tab}"   ; Task View (Win+Tab)
+    } else if (LB_SentDown) {
         SendEvent "{LButton up}"
     }
+    LB_DownInTL := false
+    LB_DownInBL := false
+    LB_SentDown := false
     return
 }
 
-; Right click
-*RButton::
-{
-    if (!IsInTopLeft())
+; Right click (same gating for consistency)
+*RButton:: {
+    global RB_DownInTL, RB_SentDown
+    RB_DownInTL := IsInTopLeft()
+    if (!RB_DownInTL) {
         SendEvent "{RButton down}"
-    return
-}
-*RButton Up::
-{
-    if (IsInTopLeft()) {
-        EndAltTabIfActive()
-        ToggleMaxMin()
+        RB_SentDown := true
     } else {
-        SendEvent "{RButton up}"
+        RB_SentDown := false
     }
     return
 }
+*RButton Up:: {
+    global RB_DownInTL, RB_SentDown
+    if (RB_DownInTL && IsInTopLeft()) {
+        EndAltTabIfActive()
+        ToggleMaxMin()
+    } else if (RB_SentDown) {
+        SendEvent "{RButton up}"
+    }
+    RB_DownInTL := false
+    RB_SentDown := false
+    return
+}
+
 ; ---------- Fix: Let Ctrl work normally ----------
 *Ctrl::SendEvent "{Ctrl down}"
 *Ctrl Up::SendEvent "{Ctrl up}"
-
 
 ; ---------- Safety ----------
 OnExit Cleanup
