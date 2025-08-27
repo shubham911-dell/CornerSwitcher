@@ -7,12 +7,11 @@ This AutoHotkey v2 script adds **hot corners** to Windows: **Top-Left Corner** �
 1.  **Install AutoHotkey v2**  
     👉 [Download here](https://www.autohotkey.com/)
     
-3.  **Click ` ctrl ` `shift` `s` after clicking the link below 👇🏻 to Download this script**
-    ```sh
-    https://github.com/shubham911-dell/CornerSwitcher/blob/main/CornerSwitcher.ahk
-    ```
+3.  **Click ` ctrl ` `shift` `s` after clicking the link below ↙️ to Download this script**
+  
+    👉🏻 [CornerSwitcher.ahk](https://github.com/shubham911-dell/CornerSwitcher/blob/main/CornerSwitcher.ahk)
    
-4.  **Run the script**  
+5.  **Run the script**  
     → Double-click the `.ahk` file, and it will auto-run with admin rights.
 
 ## ⚙️ Quick Config
