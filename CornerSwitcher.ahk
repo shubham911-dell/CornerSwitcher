@@ -3,6 +3,8 @@
 SendMode "Event"
 SetKeyDelay 0, 20
 SetMouseDelay -1
+SetWinDelay -1
+try ProcessSetPriority("BelowNormal")
 
 ; ==================== CONFIG ====================
 monitorIndex      := 1        ; laptop's single display
@@ -11,54 +13,54 @@ marginBL          := 14       ; bottom-left corner size (px)
 pollMs            := 25
 
 ; Visuals
-highlightTLColor  := "Yellow" ; TL idle hover color
+highlightTLColor  := "Red"    ; TL idle hover color
 highlightTLAlpha  := 210
-activeTLColor     := "Aqua"   ; TL active (Alt+Tab open) color
+activeTLColor     := "Yellow" ; TL active (Alt+Tab open) color
 activeTLAlpha     := 230
-highlightBLColor  := "Lime"   ; BL hover color
+highlightBLColor  := "Gray"   ; BL hover color
 highlightBLAlpha  := 160
 
 ; Timing
-altTabOpenDelayMs := 100      ; time to let Alt+Tab render before first step (increase if needed)
-stepCooldownMs    := 70       ; minimum time between steps (prevents missed steps)
+altTabOpenDelayMs := 100      ; time to let Alt+Tab render before first step
+stepCooldownMs    := 70       ; minimum time between steps
 ; ================================================
 
-; Auto-elevate for reliable keystrokes
+; Auto-elevate
 if !A_IsAdmin {
     try {
-        Run '*RunAs "' A_ScriptFullPath '"'
+        Run('*RunAs "' A_ScriptFullPath '"')
         ExitApp
     }
 }
 
-CoordMode "Mouse", "Screen"
+CoordMode("Mouse", "Screen")
 
 ; Screen/work metrics
 global lScr := 0, tScr := 0, rScr := 0, bScr := 0
 global lWork := 0, tWork := 0, rWork := 0, bWork := 0
-MonitorGet monitorIndex, &lScr, &tScr, &rScr, &bScr
-UpdateMetrics()
-SetTimer UpdateMetrics, 1500
+MonitorGet(monitorIndex, &lScr, &tScr, &rScr, &bScr)
+
+; Previous metrics
+global _prev_lScr := lScr, _prev_tScr := tScr, _prev_rScr := rScr, _prev_bScr := bScr
 
 ; State
-global TL_inside := false
-global TL_altTabActive := false
-global BL_inside := false
-global lastStepTick := 0
+global TL_inside := false, TL_altTabActive := false, BL_inside := false
+global lastStepTick := 0, TL_firstScrollDone := false
 
-; Added state: track whether first scroll (open-only) already happened
-global TL_firstScrollDone := false
-
-; Click origin state (prevents stray triggers)
+; Click origin state
 global LB_DownInTL := false, LB_DownInBL := false, LB_SentDown := false
 global RB_DownInTL := false, RB_SentDown := false
+
+; Overlay state
+global tlGuardVisible := false, guardNeedsReposition := false
+global tlHoverVisible := false, tlHoverActive := false, tlHoverNeedsReposition := false
+global blHoverVisible := false, blHoverNeedsReposition := false
 
 ; ---------- Helpers ----------
 IsInTopLeft() {
     MouseGetPos &mx, &my
     return (mx <= lScr + marginTL && my <= tScr + marginTL)
 }
-; Use SCREEN edges for BL corner (fixes left-edge false positives)
 IsInBottomLeft() {
     MouseGetPos &mx, &my
     return (mx <= lScr + marginBL && my >= bScr - marginBL)
@@ -83,94 +85,157 @@ KeepTopMost(hwnd) {
         , "ptr", hwnd
         , "ptr", -1
         , "int", 0, "int", 0, "int", 0, "int", 0
-        , "uint", SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
-}
-UpdateMetrics(*) {
-    MonitorGetWorkArea monitorIndex, &lWork, &tWork, &rWork, &bWork
-    MonitorGet monitorIndex, &lScr, &tScr, &rScr, &bScr
-    ShowTLGuard()
-    ShowTLHover(false)
-    ShowBLHover(false)
+        , "uint", SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW, "int")
 }
 
+UpdateMetrics(*) {
+    global monitorIndex, lWork, tWork, rWork, bWork
+    global lScr, tScr, rScr, bScr, _prev_lScr, _prev_tScr, _prev_rScr, _prev_bScr
+    global guardNeedsReposition, tlHoverNeedsReposition, blHoverNeedsReposition
+    global tlGuard, tlHover, blHover
+
+    MonitorGetWorkArea(monitorIndex, &lWork, &tWork, &rWork, &bWork)
+    MonitorGet(monitorIndex, &lScr, &tScr, &rScr, &bScr)
+
+    if (lScr != _prev_lScr || tScr != _prev_tScr || rScr != _prev_rScr || bScr != _prev_bScr) {
+        guardNeedsReposition := true
+        tlHoverNeedsReposition := true
+        blHoverNeedsReposition := true
+
+        _prev_lScr := lScr
+        _prev_tScr := tScr
+        _prev_rScr := rScr
+        _prev_bScr := bScr
+
+        if IsSet(tlGuard)
+            try KeepTopMost(tlGuard.Hwnd)
+        if IsSet(tlHover)
+            try KeepTopMost(tlHover.Hwnd)
+        if IsSet(blHover)
+            try KeepTopMost(blHover.Hwnd)
+    }
+}   ; ✅ THIS closing brace was missing in your version
+
 ; ---------- Overlays ----------
-; TL guard: always-on-top, click-through, ultra-transparent
 global tlGuard := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x20")
 tlGuard.BackColor := "Black"
 tlGuard.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
-try WinSetTransparent 1, "ahk_id " . tlGuard.Hwnd
-KeepTopMost tlGuard.Hwnd
+try WinSetTransparent(1, "ahk_id " . tlGuard.Hwnd)
+KeepTopMost(tlGuard.Hwnd)
+tlGuardVisible := true
 
-ShowTLGuard() {
+ShowTLGuard(show := true) {
+    global tlGuard, tlGuardVisible, guardNeedsReposition
     if !IsSet(tlGuard)
         return
-    tlGuard.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
-    KeepTopMost tlGuard.Hwnd
-}
-
-; TL hover indicator
-global tlHover := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x20")
-tlHover.BackColor := highlightTLColor
-tlHover.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
-try WinSetTransparent highlightTLAlpha, "ahk_id " . tlHover.Hwnd
-tlHover.Hide()
-
-ShowTLHover(show := true, active := false) {
-    if (!IsSet(tlHover))
-        return
     if (show) {
-        tlHover.BackColor := active ? activeTLColor : highlightTLColor
-        try WinSetTransparent active ? activeTLAlpha : highlightTLAlpha, "ahk_id " . tlHover.Hwnd
-        tlHover.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
-    } else {
-        if WinExist("ahk_id " . tlHover.Hwnd)
-            tlHover.Hide()
+        if (!tlGuardVisible) {
+            tlGuard.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
+            tlGuardVisible := true
+            guardNeedsReposition := false
+        } else if (guardNeedsReposition) {
+            try WinMove(lScr, tScr, marginTL, marginTL, "ahk_id " . tlGuard.Hwnd)
+            guardNeedsReposition := false
+        }
+    } else if (tlGuardVisible) {
+        try tlGuard.Hide()
+        tlGuardVisible := false
     }
 }
 
-; BL hover indicator (align to SCREEN bottom-left)
+global tlHover := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x20")
+tlHover.BackColor := highlightTLColor
+tlHover.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
+try WinSetTransparent(highlightTLAlpha, "ahk_id " . tlHover.Hwnd)
+tlHover.Hide()
+tlHoverVisible := false
+tlHoverActive  := false
+
+ShowTLHover(show := true, active := false) {
+    global tlHover, tlHoverVisible, tlHoverActive, tlHoverNeedsReposition
+    if (!IsSet(tlHover))
+        return
+    if (show) {
+        if (!tlHoverVisible) {
+            try tlHover.BackColor := active ? activeTLColor : highlightTLColor
+            try WinSetTransparent(active ? activeTLAlpha : highlightTLAlpha, "ahk_id " . tlHover.Hwnd)
+            tlHover.Show(Format("x{} y{} w{} h{} NA", lScr, tScr, marginTL, marginTL))
+            tlHoverVisible := true
+            tlHoverActive := active
+            tlHoverNeedsReposition := false
+        } else {
+            if (tlHoverActive != active) {
+                try tlHover.BackColor := active ? activeTLColor : highlightTLColor
+                try WinSetTransparent(active ? activeTLAlpha : highlightTLAlpha, "ahk_id " . tlHover.Hwnd)
+                tlHoverActive := active
+            }
+            if (tlHoverNeedsReposition) {
+                try WinMove(lScr, tScr, marginTL, marginTL, "ahk_id " . tlHover.Hwnd)
+                tlHoverNeedsReposition := false
+            }
+        }
+    } else if (tlHoverVisible) {
+        try tlHover.Hide()
+        tlHoverVisible := false
+        tlHoverActive := false
+        tlHoverNeedsReposition := false
+    }
+}
+
 global blHover := Gui("+AlwaysOnTop -Caption +ToolWindow +E0x20")
 blHover.BackColor := highlightBLColor
 blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bScr - marginBL, marginBL, marginBL))
-try WinSetTransparent highlightBLAlpha, "ahk_id " . blHover.Hwnd
+try WinSetTransparent(highlightBLAlpha, "ahk_id " . blHover.Hwnd)
 blHover.Hide()
+blHoverVisible := false
 
 ShowBLHover(show := true) {
+    global blHover, blHoverVisible, blHoverNeedsReposition
     if (!IsSet(blHover))
         return
     if (show) {
-        blHover.BackColor := highlightBLColor
-        try WinSetTransparent highlightBLAlpha, "ahk_id " . blHover.Hwnd
-        blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bScr - marginBL, marginBL, marginBL))
-    } else {
-        if WinExist("ahk_id " . blHover.Hwnd)
-            blHover.Hide()
+        if (!blHoverVisible) {
+            blHover.BackColor := highlightBLColor
+            try WinSetTransparent(highlightBLAlpha, "ahk_id " . blHover.Hwnd)
+            blHover.Show(Format("x{} y{} w{} h{} NA", lScr, bScr - marginBL, marginBL, marginBL))
+            blHoverVisible := true
+            blHoverNeedsReposition := false
+        } else if (blHoverNeedsReposition) {
+            try WinMove(lScr, bScr - marginBL, marginBL, marginBL, "ahk_id " . blHover.Hwnd)
+            blHoverNeedsReposition := false
+        }
+    } else if (blHoverVisible) {
+        try blHover.Hide()
+        blHoverVisible := false
+        blHoverNeedsReposition := false
     }
 }
 
 ; ---------- Loop ----------
-SetTimer CornerLoop, pollMs
+SetTimer(UpdateMetrics, 1500)
+SetTimer(CornerLoop, pollMs)
 
 CornerLoop() {
     global TL_inside, TL_altTabActive, BL_inside, TL_firstScrollDone
+    global tlHoverVisible
 
-    ; TL behavior: hover does nothing (only shows indicator)
     curTL := IsInTopLeft()
     if (curTL && !TL_inside) {
         TL_inside := true
-        ShowTLGuard()
-        ShowTLHover(true, false)
+        ShowTLGuard(true)
+        ShowTLHover(true, TL_altTabActive)
     } else if (!curTL && TL_inside) {
         TL_inside := false
         ShowTLHover(false, false)
         EndAltTabIfActive()
-        TL_firstScrollDone := false   ; reset when leaving corner
+        TL_firstScrollDone := false
     } else if (curTL) {
-        ShowTLGuard()
+        ShowTLGuard(true)
         ShowTLHover(true, TL_altTabActive)
+    } else if (tlHoverVisible) {
+        ShowTLHover(false, false)
     }
 
-    ; BL hover indicator
     curBL := IsInBottomLeft()
     if (curBL && !BL_inside) {
         BL_inside := true
@@ -178,6 +243,8 @@ CornerLoop() {
     } else if (!curBL && BL_inside) {
         BL_inside := false
         ShowBLHover(false)
+    } else if (curBL) {
+        ShowBLHover(true)
     }
 }
 
@@ -186,33 +253,30 @@ OpenSwitcherIfNeeded() {
     global TL_altTabActive
     if (TL_altTabActive)
         return
-    ; Hold Alt, show grid (Tab), then neutralize initial step with Shift+Tab
-    SendEvent "{Blind}{Alt down}"
-    Sleep 40
-    SendEvent "{Blind}{Tab}"
-    Sleep altTabOpenDelayMs
-    SendEvent "{Blind}+{Tab}"
+    SendEvent("{Blind}{Alt down}")
+    Sleep(40)
+    SendEvent("{Blind}{Tab}")
+    Sleep(altTabOpenDelayMs)
+    SendEvent("{Blind}+{Tab}")
     TL_altTabActive := true
     ShowTLHover(true, true)
 }
 StepRight() {
     if (!TL_altTabActive)
         return
-    ; Move selection right (next app)
-    SendEvent "{Blind}{Right}"
-    Sleep 10
+    SendEvent("{Blind}{Right}")
+    Sleep(10)
 }
 StepLeft() {
     if (!TL_altTabActive)
         return
-    ; Move selection left (previous app)
-    SendEvent "{Blind}{Left}"
-    Sleep 10
+    SendEvent("{Blind}{Left}")
+    Sleep(10)
 }
 EndAltTabIfActive() {
     global TL_altTabActive, TL_firstScrollDone
     if (TL_altTabActive) {
-        SendEvent "{Blind}{Alt up}"
+        SendEvent("{Blind}{Alt up}")
         TL_altTabActive := false
         ShowTLHover(true, false)
     }
@@ -224,72 +288,67 @@ ToggleMaxMin() {
     hwnd := WinGetID("A")
     if !hwnd
         return
-    mm := WinGetMinMax("ahk_id " . hwnd) ; 1 = maximized, -1 = minimized, 0 = normal
+    mm := WinGetMinMax("ahk_id " . hwnd)
     if (mm = 1)
-        WinMinimize "ahk_id " . hwnd
+        WinMinimize("ahk_id " . hwnd)
     else
-        WinMaximize "ahk_id " . hwnd
+        WinMaximize("ahk_id " . hwnd)
 }
 InstantSwitchRecent() {
-    ; Alt down -> Tab -> Alt up (instant recent app)
-    SendEvent "{Blind}{Alt down}"
-    Sleep 30
-    SendEvent "{Blind}{Tab}"
-    Sleep 30
-    SendEvent "{Blind}{Alt up}"
+    SendEvent("{Blind}{Alt down}")
+    Sleep(30)
+    SendEvent("{Blind}{Tab}")
+    Sleep(30)
+    SendEvent("{Blind}{Alt up}")
 }
 
-; ---------- Global mouse handlers (wildcard: work even while Alt is held) ----------
-; Using wildcard (*) ensures scroll still triggers when Alt-Tab UI is visible
+; ---------- Mouse Wheel Hotkeys ----------
 *WheelDown:: {
     global TL_firstScrollDone, TL_altTabActive
     if (IsInTopLeft()) {
         if (!TL_altTabActive) {
-            ; first scroll -> just open the switcher (no stepping)
             OpenSwitcherIfNeeded()
             TL_firstScrollDone := true
         } else if (!TL_firstScrollDone) {
-            ; if somehow switcher is active but first-scroll flag not set, set it and do not step
             TL_firstScrollDone := true
         } else if (CanStep()) {
             StepLeft()
         }
     } else {
-        SendEvent "{WheelDown}"
+        if (TL_altTabActive)
+            EndAltTabIfActive()
+        SendEvent("{WheelDown}")
     }
-    return
 }
 *WheelUp:: {
     global TL_firstScrollDone, TL_altTabActive
     if (IsInTopLeft()) {
         if (!TL_altTabActive) {
-            ; first scroll -> just open the switcher (no stepping)
             OpenSwitcherIfNeeded()
             TL_firstScrollDone := true
         } else if (!TL_firstScrollDone) {
-            ; set first-scroll consumed, do not step
             TL_firstScrollDone := true
         } else if (CanStep()) {
             StepRight()
         }
     } else {
-        SendEvent "{WheelUp}"
+        if (TL_altTabActive)
+            EndAltTabIfActive()
+        SendEvent("{WheelUp}")
     }
-    return
 }
 
-; Left click (gate on where the click STARTED to avoid accidental triggers)
+; ---------- Click handlers ----------
 *LButton:: {
     global LB_DownInTL, LB_DownInBL, LB_SentDown
     LB_DownInTL := IsInTopLeft()
     LB_DownInBL := IsInBottomLeft()
     if (!LB_DownInTL && !LB_DownInBL) {
-        SendEvent "{LButton down}"
+        SendEvent("{LButton down}")
         LB_SentDown := true
     } else {
         LB_SentDown := false
     }
-    return
 }
 *LButton Up:: {
     global LB_DownInTL, LB_DownInBL, LB_SentDown
@@ -298,27 +357,24 @@ InstantSwitchRecent() {
         InstantSwitchRecent()
     } else if (LB_DownInBL && IsInBottomLeft()) {
         EndAltTabIfActive()
-        SendEvent "#{Tab}"   ; Task View (Win+Tab)
+        SendEvent("#{Tab}")
     } else if (LB_SentDown) {
-        SendEvent "{LButton up}"
+        SendEvent("{LButton up}")
     }
     LB_DownInTL := false
     LB_DownInBL := false
     LB_SentDown := false
-    return
 }
 
-; Right click (same gating for consistency)
 *RButton:: {
     global RB_DownInTL, RB_SentDown
     RB_DownInTL := IsInTopLeft()
     if (!RB_DownInTL) {
-        SendEvent "{RButton down}"
+        SendEvent("{RButton down}")
         RB_SentDown := true
     } else {
         RB_SentDown := false
     }
-    return
 }
 *RButton Up:: {
     global RB_DownInTL, RB_SentDown
@@ -326,19 +382,22 @@ InstantSwitchRecent() {
         EndAltTabIfActive()
         ToggleMaxMin()
     } else if (RB_SentDown) {
-        SendEvent "{RButton up}"
+        SendEvent("{RButton up}")
     }
     RB_DownInTL := false
     RB_SentDown := false
-    return
 }
 
-; ---------- Fix: Let Ctrl work normally ----------
-*Ctrl::SendEvent "{Ctrl down}"
-*Ctrl Up::SendEvent "{Ctrl up}"
+; ---------- Fix Ctrl ----------
+*Ctrl::SendEvent("{Ctrl down}")
+*Ctrl Up::SendEvent("{Ctrl up}")
 
 ; ---------- Safety ----------
-OnExit Cleanup
+OnExit(Cleanup)
 Cleanup(Reason, Code) {
-    SendEvent "{Blind}{Alt up}"
+    try SendEvent("{Blind}{Alt up}")
+    if (tlHoverVisible)
+        ShowTLHover(false, false)
+    if (blHoverVisible)
+        ShowBLHover(false)
 }
