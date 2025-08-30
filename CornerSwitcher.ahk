@@ -1,4 +1,8 @@
 #Requires AutoHotkey v2.0
+
+; Increase max hotkeys per interval to avoid warnings
+A_MaxHotkeysPerInterval := 250  ; default is 50
+
 #SingleInstance Force
 SendMode "Event"
 SetKeyDelay 0, 20
@@ -401,3 +405,4 @@ Cleanup(Reason, Code) {
     if (blHoverVisible)
         ShowBLHover(false)
 }
+
