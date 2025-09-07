@@ -1,10 +1,10 @@
-# 🖱️ Hot Corners for Windows (AutoHotkey v2)
+# 🖱️ Hot Corners for Windows (AutoHotkey v1)
 
-This AutoHotkey v2 script adds **hot corners** to Windows: **Top-Left Corner** → App switching (Alt+Tab), **Bottom-Left Corner** → Task View, and mouse **scroll & clicks** for quick window control.
+This AutoHotkey v1 script adds **hot corners** to Windows: **Top-Left Corner** → App switching (Alt+Tab), **Bottom-Left Corner** → Task View, and mouse **scroll & clicks** for quick window control.
 
 ## 🚀 Setup
 
-1.  **Install AutoHotkey v2**  
+1.  **Install AutoHotkey v1**  
     👉 [Download here](https://www.autohotkey.com/)
     
 3.  **Click ` ctrl ` `shift` `s` after clicking the link below ↙️ to Download this script**
