@@ -1,424 +1,703 @@
-; AutoHotkey v1.1.37.2
-; Converted from AHK v2 keeping functionality intact
+; ====================================================================
+; Stable corner nav, chording, and browser zoom (Windows-like pacing)
+; ====================================================================
 
-#SingleInstance, Force
-#MaxHotkeysPerInterval 250
+#NoEnv
+#SingleInstance Force
+#InstallMouseHook
+#InstallKeybdHook
+#UseHook
+SendMode Input
+SetBatchLines -1
+ListLines Off
+; Use Windows-like defaults instead of hyper-fast settings
+SetKeyDelay, 10, 10
+SetMouseDelay, 10
+SetDefaultMouseSpeed, 2
+CoordMode, Mouse, Screen
+; Removed High priority for a more native feel
+; Process, Priority,, High
 
-SendMode, Event
-SetKeyDelay, 0, 20
-SetMouseDelay, -1
-SetWinDelay, -1
-Process, Priority,, BelowNormal
-
-; ==================== CONFIG ====================
-monitorIndex      := 1        ; laptop's single display
-marginTL          := 14       ; top-left corner size (px)
-marginBL          := 14       ; bottom-left corner size (px)
-pollMs            := 25
-
-; Visuals
-highlightTLColor  := "Red"    ; TL idle hover color
-highlightTLAlpha  := 210
-activeTLColor     := "Yellow" ; TL active (Alt+Tab open) color
-activeTLAlpha     := 230
-highlightBLColor  := "Gray"   ; BL hover color
-highlightBLAlpha  := 160
-
-; Timing
-altTabOpenDelayMs := 100      ; time to let Alt+Tab render before first step
-stepCooldownMs    := 70       ; minimum time between steps
-; ================================================
-
-; Auto-elevate
+; ---------------------------- Auto-elevate -----------------------------
 if !A_IsAdmin
 {
-    Run, *RunAs "%A_ScriptFullPath%"
-    ExitApp
+    Try
+    {
+        Run *RunAs "%A_ScriptFullPath%",, Hide
+        ExitApp
+    }
 }
 
-CoordMode, Mouse, Screen
+; ============================ SETTINGS ================================
+NavMethod := "AltArrows"      ; "AltArrows" or "XButtons"
+monitorIndex := 1
 
-; Screen/work metrics
+; Corner hit areas
+marginTL := 20
+marginBL := 20
+
+; Behavior
+DisableInFullscreen := true
+pollMs := 25                  ; slightly slower polling (more natural)
+
+; Multi-click timing for top-left corner
+multiClickWindow := 400        ; 400ms window for multi-clicks
+tlClickCount := 0
+tlLastClickTime := 0
+
+; Alt-Tab pinning
+altTabPinned := false          ; right-click pin state
+
+; Visuals (hover only; no permanent guard window)
+highlightTLColor := "FF0000"   ; red when hovering TL
+highlightTLAlpha := 180
+activeTLColor    := "FFFF00"   ; yellow when Alt+Tab is active
+activeTLAlpha    := 200
+highlightBLColor := "888888"   ; gray when hovering BL
+highlightBLAlpha := 160
+
+; Alt-Tab behavior (Windows-like pacing)
+altTabOpenDelayMs   := 120     ; small delay after opening Alt-Tab
+stepDelayMs := 80              ; delay between Tab presses for animation
+; Commit rule: ONLY when leaving TL area or on click inside TL (no idle commit)
+stepCooldownMs      := 120     ; throttle stepping to match Windows feel
+
+; Watchdog
+stuckKeyCheckMs     := 700     ; release Alt/Ctrl/Shift quickly if they get stuck
+; =====================================================================
+
+; ---------------------------- Internal state --------------------------
+; Chording and zoom
+RDown := false
+RSolo := false
+LDown := false
+SuppressRUp := false
+SuppressLUp := false
+BlockNextSoloRClick := false
+Sending := false
+ZoomActive := false
+ZoomUsed := false
+
+; Corner state
+TL_inside := false
+BL_inside := false
+g_IsAltTabActive := false   ; renamed for clarity
+lastStepTick := 0
+
+; Corner buttons state
+LB_DownInTL := false
+LB_DownInBL := false
+RB_DownInTL := false
+
+; Overlay handles/visibility
+tlHoverHwnd := 0, blHoverHwnd := 0
+tlHoverVisible := false, blHoverVisible := false
+
+; Screen/work area
 lScr := 0, tScr := 0, rScr := 0, bScr := 0
 lWork := 0, tWork := 0, rWork := 0, bWork := 0
+; =====================================================================
 
-; Initialize monitor metrics
-SysGet, WA, MonitorWorkArea, %monitorIndex%
-lWork := WALeft, tWork := WATop, rWork := WARight, bWork := WABottom
-SysGet, Mon, Monitor, %monitorIndex%
-lScr := MonLeft, tScr := MonTop, rScr := MonRight, bScr := MonBottom
+; ------------------------------ Metrics -------------------------------
+ReadMonitorMetrics()
+{
+    global monitorIndex, lScr, tScr, rScr, bScr, lWork, tWork, rWork, bWork
+    SysGet, Mon, Monitor, %monitorIndex%
+    lScr := MonLeft, tScr := MonTop, rScr := MonRight, bScr := MonBottom
+    SysGet, WA, MonitorWorkArea, %monitorIndex%
+    lWork := WALeft, tWork := WATop, rWork := WARight, bWork := WABottom
+}
+ReadMonitorMetrics()
 
-; Previous metrics
-_prev_lScr := lScr, _prev_tScr := tScr, _prev_rScr := rScr, _prev_bScr := bScr
+OnMessage(0x007E, "OnDisplayChange")
+OnDisplayChange(wParam, lParam, msg, hwnd)
+{
+    ReadMonitorMetrics()
+    RepositionOverlays()
+}
 
-; State
-TL_inside := false, TL_altTabActive := false, BL_inside := false
-lastStepTick := 0, TL_firstScrollDone := false
-
-; Click origin state
-LB_DownInTL := false, LB_DownInBL := false, LB_SentDown := false
-RB_DownInTL := false, RB_SentDown := false
-
-; Overlay state
-tlGuardVisible := false, guardNeedsReposition := false
-tlHoverVisible := false, tlHoverActive := false, tlHoverNeedsReposition := false
-blHoverVisible := false, blHoverNeedsReposition := false
-
-; ---------- Helpers ----------
-IsInTopLeft() {
+; ----------------------------- Helpers --------------------------------
+IsInTopLeft()
+{
     global lScr, tScr, marginTL
     MouseGetPos, mx, my
     return (mx <= lScr + marginTL && my <= tScr + marginTL)
 }
-IsInBottomLeft() {
+
+IsInBottomLeft()
+{
     global lScr, bScr, marginBL
     MouseGetPos, mx, my
     return (mx <= lScr + marginBL && my >= bScr - marginBL)
 }
-CanStep() {
+
+IsFullscreenActive()
+{
+    global DisableInFullscreen, lScr, tScr, rScr, bScr
+    if (!DisableInFullscreen)
+        return false
+
+    WinGet, hwnd, ID, A
+    if !hwnd
+        return false
+
+    WinGet, style, Style, ahk_id %hwnd%
+    ; If no caption and it covers the screen -> likely fullscreen
+    if !(style & 0xC00000)  ; WS_CAPTION
+    {
+        WinGetPos, wx, wy, ww, wh, ahk_id %hwnd%
+        if (wx <= lScr && wy <= tScr && wx + ww >= rScr && wy + wh >= bScr)
+            return true
+    }
+    return false
+}
+
+AppIsBrowser()
+{
+    WinGet, pn, ProcessName, A
+    StringLower, pn, pn
+    if pn in chrome.exe,msedge.exe,brave.exe,opera.exe,opera_gx.exe,vivaldi.exe,firefox.exe
+        return true
+    return false
+}
+
+IsAltTabActive()
+{
+    global g_IsAltTabActive
+    return g_IsAltTabActive
+}
+
+ShouldHandleRButton()
+{
+    return (!IsInTopLeft() && !IsAltTabActive() && !IsFullscreenActive())
+}
+
+ShouldHandleLeftChord()
+{
+    global RDown, SuppressLUp
+    return (!IsInTopLeft() && !IsAltTabActive() && !IsFullscreenActive() && (GetKeyState("RButton","P") || RDown || SuppressLUp))
+}
+
+CanStep()
+{
     global lastStepTick, stepCooldownMs
     now := A_TickCount
-    if (now - lastStepTick >= stepCooldownMs) {
+    if (now - lastStepTick >= stepCooldownMs)
+    {
         lastStepTick := now
         return true
     }
     return false
 }
-KeepTopMost(hwnd) {
-    if !hwnd
+
+NavBack()
+{
+    global NavMethod
+    if (NavMethod = "XButtons")
+        SendEvent {XButton1}
+    else
+    {
+        SendEvent {Alt down}
+        Sleep, 20
+        SendEvent {Left}
+        Sleep, 20
+        SendEvent {Alt up}
+    }
+}
+
+NavForward()
+{
+    global NavMethod
+    if (NavMethod = "XButtons")
+        SendEvent {XButton2}
+    else
+    {
+        SendEvent {Alt down}
+        Sleep, 20
+        SendEvent {Right}
+        Sleep, 20
+        SendEvent {Alt up}
+    }
+}
+
+ForceReleaseMods()
+{
+    if GetKeyState("Alt","P")
+        SendEvent {Alt up}
+    if GetKeyState("Ctrl","P")
+        SendEvent {Ctrl up}
+    if GetKeyState("Shift","P")
+        SendEvent {Shift up}
+}
+
+; --------------------------- Overlays (hover only) ---------------------
+CreateOverlays()
+{
+    global tlHoverHwnd, blHoverHwnd, tlHoverVisible, blHoverVisible
+    global lScr, tScr, bScr, marginTL, marginBL, highlightTLColor, highlightTLAlpha
+    global highlightBLColor, highlightBLAlpha
+
+    ; Top-left hover indicator - THIN LINE (2px height like Windows Show Desktop)
+    Gui, tlHover: New, +AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndtlHoverHwnd
+    Gui, tlHover: Color, %highlightTLColor%
+    Gui, tlHover: Show, % "x" lScr " y" tScr " w" marginTL " h2 NA"  ; 2px height
+    WinSet, Transparent, %highlightTLAlpha%, ahk_id %tlHoverHwnd%
+    tlHoverVisible := false
+    Gui, tlHover: Hide
+
+    ; Bottom-left hover indicator - THIN LINE (2px height)
+    Gui, blHover: New, +AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndblHoverHwnd
+    Gui, blHover: Color, %highlightBLColor%
+    Gui, blHover: Show, % "x" lScr " y" (bScr - 2) " w" marginBL " h2 NA"  ; 2px height at bottom
+    WinSet, Transparent, %highlightBLAlpha%, ahk_id %blHoverHwnd%
+    blHoverVisible := false
+    Gui, blHover: Hide
+}
+
+RepositionOverlays()
+{
+    global tlHoverHwnd, blHoverHwnd, lScr, tScr, bScr, marginTL, marginBL, tlHoverVisible, blHoverVisible
+    if (tlHoverHwnd)
+        WinMove, ahk_id %tlHoverHwnd%, , %lScr%, %tScr%, %marginTL%, 2  ; 2px height
+    if (blHoverHwnd)
+        WinMove, ahk_id %blHoverHwnd%, , %lScr%, % (bScr - 2), %marginBL%, 2  ; 2px height
+    if (tlHoverHwnd && tlHoverVisible)
+        Gui, tlHover: Show, NA
+    if (blHoverHwnd && blHoverVisible)
+        Gui, blHover: Show, NA
+}
+
+ShowTLHover(show := true, active := false)
+{
+    global tlHoverHwnd, tlHoverVisible, highlightTLColor, highlightTLAlpha, activeTLColor, activeTLAlpha
+    if (!tlHoverHwnd)
         return
-    static SWP_NOSIZE := 0x0001
-    static SWP_NOMOVE := 0x0002
-    static SWP_NOACTIVATE := 0x0010
-    static SWP_SHOWWINDOW := 0x0040
-    DllCall("SetWindowPos"
-        , "Ptr", hwnd
-        , "Ptr", -1
-        , "Int", 0, "Int", 0, "Int", 0, "Int", 0
-        , "UInt", SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE|SWP_SHOWWINDOW)
-}
-
-UpdateMetrics() {
-    global monitorIndex, lWork, tWork, rWork, bWork
-    global lScr, tScr, rScr, bScr, _prev_lScr, _prev_tScr, _prev_rScr, _prev_bScr
-    global guardNeedsReposition, tlHoverNeedsReposition, blHoverNeedsReposition
-    global tlGuardHwnd, tlHoverHwnd, blHoverHwnd
-
-    SysGet, WA, MonitorWorkArea, %monitorIndex%
-    lWork := WALeft, tWork := WATop, rWork := WARight, bWork := WABottom
-    SysGet, Mon, Monitor, %monitorIndex%
-    lScr := MonLeft, tScr := MonTop, rScr := MonRight, bScr := MonBottom
-
-    if (lScr != _prev_lScr || tScr != _prev_tScr || rScr != _prev_rScr || bScr != _prev_bScr) {
-        guardNeedsReposition := true
-        tlHoverNeedsReposition := true
-        blHoverNeedsReposition := true
-
-        _prev_lScr := lScr
-        _prev_tScr := tScr
-        _prev_rScr := rScr
-        _prev_bScr := bScr
-
-        if (tlGuardHwnd)
-            KeepTopMost(tlGuardHwnd)
-        if (tlHoverHwnd)
-            KeepTopMost(tlHoverHwnd)
-        if (blHoverHwnd)
-            KeepTopMost(blHoverHwnd)
+    if (show)
+    {
+        color := active ? activeTLColor : highlightTLColor
+        alpha := active ? activeTLAlpha : highlightTLAlpha
+        Gui, tlHover: Color, %color%
+        WinSet, Transparent, %alpha%, ahk_id %tlHoverHwnd%
+        Gui, tlHover: Show, NA
+        tlHoverVisible := true
     }
-}
-
-; ---------- Overlays ----------
-Gui, tlGuard: New, +AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndtlGuardHwnd
-Gui, tlGuard: Color, Black
-Gui, tlGuard: Show, % "x" lScr " y" tScr " w" marginTL " h" marginTL " NA"
-WinSet, Transparent, 1, ahk_id %tlGuardHwnd%
-KeepTopMost(tlGuardHwnd)
-tlGuardVisible := true
-
-ShowTLGuard(show := true) {
-    global tlGuardHwnd, tlGuardVisible, guardNeedsReposition
-    global lScr, tScr, marginTL
-    if (show) {
-        if (!tlGuardVisible) {
-            Gui, tlGuard: Show, % "x" lScr " y" tScr " w" marginTL " h" marginTL " NA"
-            tlGuardVisible := true
-            guardNeedsReposition := false
-        } else if (guardNeedsReposition) {
-            WinMove, ahk_id %tlGuardHwnd%, , %lScr%, %tScr%, %marginTL%, %marginTL%
-            guardNeedsReposition := false
-        }
-    } else if (tlGuardVisible) {
-        Gui, tlGuard: Hide
-        tlGuardVisible := false
-    }
-}
-
-Gui, tlHover: New, +AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndtlHoverHwnd
-Gui, tlHover: Color, %highlightTLColor%
-Gui, tlHover: Show, % "x" lScr " y" tScr " w" marginTL " h" marginTL " NA"
-WinSet, Transparent, %highlightTLAlpha%, ahk_id %tlHoverHwnd%
-Gui, tlHover: Hide
-tlHoverVisible := false
-tlHoverActive  := false
-
-ShowTLHover(show := true, active := false) {
-    global tlHoverHwnd, tlHoverVisible, tlHoverActive, tlHoverNeedsReposition
-    global lScr, tScr, marginTL
-    global highlightTLColor, highlightTLAlpha, activeTLColor, activeTLAlpha
-
-    if (show) {
-        if (!tlHoverVisible) {
-            color := active ? activeTLColor : highlightTLColor
-            alpha := active ? activeTLAlpha : highlightTLAlpha
-            Gui, tlHover: Color, %color%
-            WinSet, Transparent, %alpha%, ahk_id %tlHoverHwnd%
-            Gui, tlHover: Show, % "x" lScr " y" tScr " w" marginTL " h" marginTL " NA"
-            tlHoverVisible := true
-            tlHoverActive := active
-            tlHoverNeedsReposition := false
-        } else {
-            if (tlHoverActive != active) {
-                color := active ? activeTLColor : highlightTLColor
-                alpha := active ? activeTLAlpha : highlightTLAlpha
-                Gui, tlHover: Color, %color%
-                WinSet, Transparent, %alpha%, ahk_id %tlHoverHwnd%
-                tlHoverActive := active
-            }
-            if (tlHoverNeedsReposition) {
-                WinMove, ahk_id %tlHoverHwnd%, , %lScr%, %tScr%, %marginTL%, %marginTL%
-                tlHoverNeedsReposition := false
-            }
-        }
-    } else if (tlHoverVisible) {
+    else
+    {
         Gui, tlHover: Hide
         tlHoverVisible := false
-        tlHoverActive := false
-        tlHoverNeedsReposition := false
     }
 }
 
-Gui, blHover: New, +AlwaysOnTop -Caption +ToolWindow +E0x20 +HwndblHoverHwnd
-Gui, blHover: Color, %highlightBLColor%
-Gui, blHover: Show, % "x" lScr " y" (bScr - marginBL) " w" marginBL " h" marginBL " NA"
-WinSet, Transparent, %highlightBLAlpha%, ahk_id %blHoverHwnd%
-Gui, blHover: Hide
-blHoverVisible := false
-
-ShowBLHover(show := true) {
-    global blHoverHwnd, blHoverVisible, blHoverNeedsReposition
-    global lScr, bScr, marginBL, highlightBLColor, highlightBLAlpha
-
-    if (show) {
-        if (!blHoverVisible) {
-            Gui, blHover: Color, %highlightBLColor%
-            WinSet, Transparent, %highlightBLAlpha%, ahk_id %blHoverHwnd%
-            Gui, blHover: Show, % "x" lScr " y" (bScr - marginBL) " w" marginBL " h" marginBL " NA"
-            blHoverVisible := true
-            blHoverNeedsReposition := false
-        } else if (blHoverNeedsReposition) {
-            WinMove, ahk_id %blHoverHwnd%, , %lScr%, % (bScr - marginBL), %marginBL%, %marginBL%
-            blHoverNeedsReposition := false
-        }
-    } else if (blHoverVisible) {
+ShowBLHover(show := true)
+{
+    global blHoverHwnd, blHoverVisible
+    if (!blHoverHwnd)
+        return
+    if (show)
+    {
+        Gui, blHover: Show, NA
+        blHoverVisible := true
+    }
+    else
+    {
         Gui, blHover: Hide
         blHoverVisible := false
-        blHoverNeedsReposition := false
     }
 }
 
-; ---------- Loop ----------
-SetTimer, UpdateMetrics, 1500
+; ---------------------------- Alt-Tab control ---------------------------
+OpenAltTabSwitcher()
+{
+    global g_IsAltTabActive, altTabOpenDelayMs
+    if (g_IsAltTabActive)
+        return
+    SendEvent {Alt down}
+    Sleep, 40
+    SendEvent {Tab}
+    Sleep, %altTabOpenDelayMs%
+    SendEvent +{Tab}  ; back to current app so first scroll moves away from it
+    g_IsAltTabActive := true
+}
+
+OpenAltTabWithSteps(steps := 0)
+{
+    global g_IsAltTabActive, altTabOpenDelayMs, stepDelayMs
+    
+    SendEvent {Alt down}
+    Sleep, 40
+    SendEvent {Tab}
+    
+    if (steps > 0)
+    {
+        Sleep, %altTabOpenDelayMs%
+        Loop, %steps%
+        {
+            SendEvent {Tab}
+            Sleep, %stepDelayMs%
+        }
+    }
+    
+    g_IsAltTabActive := true
+}
+
+StepAltTabRight()
+{
+    global g_IsAltTabActive
+    if (!g_IsAltTabActive)
+        return
+    SendEvent {Right}
+}
+
+StepAltTabLeft()
+{
+    global g_IsAltTabActive
+    if (!g_IsAltTabActive)
+        return
+    SendEvent {Left}
+}
+
+CloseAltTabSwitcher()
+{
+    global g_IsAltTabActive, altTabPinned
+    if (g_IsAltTabActive && !altTabPinned)
+    {
+        SendEvent {Alt up}
+        g_IsAltTabActive := false
+    }
+}
+
+CommitAltTab()
+{
+    global g_IsAltTabActive, altTabPinned
+    SendEvent {Alt up}
+    g_IsAltTabActive := false
+    altTabPinned := false
+}
+
+InstantSwitchRecent()
+{
+    ; Quick single Alt+Tab to previous app
+    SendEvent {Alt down}
+    Sleep, 40
+    SendEvent {Tab}
+    Sleep, 40
+    SendEvent {Alt up}
+}
+
+; ---------------------- Corner detection loop --------------------------
 SetTimer, CornerLoop, %pollMs%
-
-CornerLoop() {
-    global TL_inside, TL_altTabActive, BL_inside, TL_firstScrollDone
-    global tlHoverVisible
-
+CornerLoop:
     curTL := IsInTopLeft()
-    if (curTL && !TL_inside) {
+    curBL := IsInBottomLeft()
+
+    ; TL hover visuals + commit Alt-Tab only when leaving TL (if not pinned)
+    if (curTL && !TL_inside)
+    {
         TL_inside := true
-        ShowTLGuard(true)
-        ShowTLHover(true, TL_altTabActive)
-    } else if (!curTL && TL_inside) {
+        ShowTLHover(true, IsAltTabActive())
+    }
+    else if (!curTL && TL_inside)
+    {
         TL_inside := false
-        ShowTLHover(false, false)
-        EndAltTabIfActive()
-        TL_firstScrollDone := false
-    } else if (curTL) {
-        ShowTLGuard(true)
-        ShowTLHover(true, TL_altTabActive)
-    } else if (tlHoverVisible) {
-        ShowTLHover(false, false)
+        ShowTLHover(false)
+        CloseAltTabSwitcher()  ; commit selection when leaving TL (respects pinned state)
+    }
+    else if (curTL && TL_inside)
+    {
+        ShowTLHover(true, IsAltTabActive())
     }
 
-    curBL := IsInBottomLeft()
-    if (curBL && !BL_inside) {
+    ; BL hover visuals
+    if (curBL && !BL_inside)
+    {
         BL_inside := true
         ShowBLHover(true)
-    } else if (!curBL && BL_inside) {
+    }
+    else if (!curBL && BL_inside)
+    {
         BL_inside := false
         ShowBLHover(false)
-    } else if (curBL) {
+    }
+    else if (curBL && BL_inside)
+    {
         ShowBLHover(true)
     }
-}
-
-; ---------- Alt+Tab control ----------
-OpenSwitcherIfNeeded() {
-    global TL_altTabActive, altTabOpenDelayMs
-    if (TL_altTabActive)
-        return
-    SendEvent, {Blind}{Alt down}
-    Sleep, 40
-    SendEvent, {Blind}{Tab}
-    Sleep, %altTabOpenDelayMs%
-    SendEvent, {Blind}+{Tab}
-    TL_altTabActive := true
-    ShowTLHover(true, true)
-}
-StepRight() {
-    global TL_altTabActive
-    if (!TL_altTabActive)
-        return
-    SendEvent, {Blind}{Right}
-    Sleep, 10
-}
-StepLeft() {
-    global TL_altTabActive
-    if (!TL_altTabActive)
-        return
-    SendEvent, {Blind}{Left}
-    Sleep, 10
-}
-EndAltTabIfActive() {
-    global TL_altTabActive, TL_firstScrollDone
-    if (TL_altTabActive) {
-        SendEvent, {Blind}{Alt up}
-        TL_altTabActive := false
-        ShowTLHover(true, false)
-    }
-    TL_firstScrollDone := false
-}
-
-; ---------- Window control ----------
-ToggleMaxMin() {
-    WinGet, hwnd, ID, A
-    if !hwnd
-        return
-    WinGet, mm, MinMax, ahk_id %hwnd%
-    if (mm = 1)
-        WinMinimize, ahk_id %hwnd%
-    else
-        WinMaximize, ahk_id %hwnd%
-}
-InstantSwitchRecent() {
-    SendEvent, {Blind}{Alt down}
-    Sleep, 30
-    SendEvent, {Blind}{Tab}
-    Sleep, 30
-    SendEvent, {Blind}{Alt up}
-}
-
-; ---------- Mouse Wheel Hotkeys ----------
-*WheelDown::
-if (IsInTopLeft()) {
-    if (!TL_altTabActive) {
-        OpenSwitcherIfNeeded()
-        TL_firstScrollDone := true
-    } else if (!TL_firstScrollDone) {
-        TL_firstScrollDone := true
-    } else if (CanStep()) {
-        StepLeft()
-    }
-} else {
-    if (TL_altTabActive)
-        EndAltTabIfActive()
-    SendEvent, {WheelDown}
-}
 return
+
+; --------------------- Watchdog: release stuck mods --------------------
+SetTimer, CheckForStuckKeys, %stuckKeyCheckMs%
+CheckForStuckKeys:
+    global g_IsAltTabActive, Sending
+    if (!g_IsAltTabActive && !Sending)
+        ForceReleaseMods()
+return
+
+; ============================ Hotkeys ================================
+
+; ----------------- Right button down: chording + zoom -----------------
+#If ShouldHandleRButton()
+
+$*RButton::
+    if (Sending)
+        return
+
+    RDown := true
+    RSolo := true
+    ZoomUsed := false
+
+    if (GetKeyState("LButton","P"))
+    {
+        ; L held, R click => Forward
+        RSolo := false
+        SuppressRUp := true
+        BlockNextSoloRClick := true
+        NavForward()
+        return
+    }
+
+    ; Enable zoom only for supported browsers
+    ZoomActive := AppIsBrowser()
+return
+
+$*RButton Up::
+    if (Sending)
+        return
+    RDown := false
+    ZoomActive := false
+
+    if (ZoomUsed)
+    {
+        ZoomUsed := false
+        RSolo := false
+        return
+    }
+
+    if (SuppressRUp)
+    {
+        SuppressRUp := false
+        RSolo := false
+        return
+    }
+
+    if (RSolo && !BlockNextSoloRClick)
+    {
+        RSolo := false
+        Sending := true
+        Click Right
+        Sending := false
+    }
+    BlockNextSoloRClick := false
+return
+#If
+
+; ----------------- Left button for Back when R held -------------------
+#If ShouldHandleLeftChord()
+
+$*LButton::
+    if (Sending)
+        return
+    RSolo := false
+    SuppressRUp := true
+    SuppressLUp := true
+    BlockNextSoloRClick := true
+    NavBack()
+return
+
+$*LButton Up::
+    if (Sending)
+        return
+    if (SuppressLUp)
+    {
+        SuppressLUp := false
+        return
+    }
+return
+#If
+
+; ------------------------ Zoom while R is held ------------------------
+#If (ZoomActive && !IsInTopLeft() && !IsAltTabActive())
+
+WheelUp::
+    ZoomUsed := true
+    SendEvent {Ctrl down}
+    Sleep, 8
+    SendEvent {WheelUp}
+    Sleep, 8
+    SendEvent {Ctrl up}
+return
+
+WheelDown::
+    ZoomUsed := true
+    SendEvent {Ctrl down}
+    Sleep, 8
+    SendEvent {WheelDown}
+    Sleep, 8
+    SendEvent {Ctrl up}
+return
+#If
+
+; ------------------------ TL corner wheel = Alt-Tab -------------------
+#If (IsInTopLeft() || IsAltTabActive())
 
 *WheelUp::
-if (IsInTopLeft()) {
-    if (!TL_altTabActive) {
-        OpenSwitcherIfNeeded()
-        TL_firstScrollDone := true
-    } else if (!TL_firstScrollDone) {
-        TL_firstScrollDone := true
-    } else if (CanStep()) {
-        StepRight()
+    if (!IsAltTabActive())
+    {
+        OpenAltTabSwitcher()
     }
-} else {
-    if (TL_altTabActive)
-        EndAltTabIfActive()
-    SendEvent, {WheelUp}
-}
+    else if (CanStep())
+    {
+        StepAltTabRight()
+    }
 return
 
-; ---------- Click handlers ----------
-*LButton::
-LB_DownInTL := IsInTopLeft()
-LB_DownInBL := IsInBottomLeft()
-if (!LB_DownInTL && !LB_DownInBL) {
-    SendEvent, {LButton down}
-    LB_SentDown := true
-} else {
-    LB_SentDown := false
-}
+*WheelDown::
+    if (!IsAltTabActive())
+    {
+        OpenAltTabSwitcher()
+    }
+    else if (CanStep())
+    {
+        StepAltTabLeft()
+    }
 return
 
-*LButton Up::
-if (LB_DownInTL && IsInTopLeft()) {
-    EndAltTabIfActive()
-    InstantSwitchRecent()
-} else if (LB_DownInBL && IsInBottomLeft()) {
-    EndAltTabIfActive()
-    SendEvent, #{Tab}
-} else if (LB_SentDown) {
-    SendEvent, {LButton up}
-}
-LB_DownInTL := false
-LB_DownInBL := false
-LB_SentDown := false
-return
-
+; Right-click to pin/unpin Alt-Tab menu (sticky mode)
 *RButton::
-RB_DownInTL := IsInTopLeft()
-if (!RB_DownInTL) {
-    SendEvent, {RButton down}
-    RB_SentDown := true
-} else {
-    RB_SentDown := false
-}
+    RB_DownInTL := true
 return
 
 *RButton Up::
-if (RB_DownInTL && IsInTopLeft()) {
-    EndAltTabIfActive()
-    ToggleMaxMin()
-} else if (RB_SentDown) {
-    SendEvent, {RButton up}
-}
-RB_DownInTL := false
-RB_SentDown := false
+    if (RB_DownInTL && (IsInTopLeft() || IsAltTabActive()))
+    {
+        if (IsAltTabActive())
+        {
+            ; Toggle pin state
+            altTabPinned := !altTabPinned
+        }
+        else
+        {
+            ; If Alt-Tab not active, do original maximize/minimize
+            WinGet, hwnd, ID, A
+            if (hwnd)
+            {
+                WinGet, mm, MinMax, ahk_id %hwnd%
+                if (mm = 1)
+                    WinMinimize, ahk_id %hwnd%
+                else
+                    WinMaximize, ahk_id %hwnd%
+            }
+        }
+    }
+    RB_DownInTL := false
+return
+#If
+
+; ------------------------ TL corner multi-click actions ---------------------
+#If IsInTopLeft()
+
+; Left-click for multi-click detection
+*LButton::
+    LB_DownInTL := true
+    
+    ; Multi-click detection
+    currentTime := A_TickCount
+    if (currentTime - tlLastClickTime <= multiClickWindow)
+    {
+        tlClickCount++
+    }
+    else
+    {
+        tlClickCount := 1
+    }
+    tlLastClickTime := currentTime
 return
 
-; ---------- Fix Ctrl ----------
-*Ctrl:: 
-SendEvent, {Ctrl down}
+*LButton Up::
+    if (LB_DownInTL && IsInTopLeft())
+    {
+        if (IsAltTabActive())
+        {
+            CommitAltTab()   ; commit current selection
+        }
+        else
+        {
+            ; Execute based on click count
+            if (tlClickCount = 1)
+            {
+                ; Single click - wait to see if more clicks coming
+                SetTimer, ExecuteTLSingleClick, -150
+            }
+            else if (tlClickCount >= 2)
+            {
+                ; Multi-click - navigate through multiple apps with animation
+                SetTimer, ExecuteTLSingleClick, Off
+                steps := tlClickCount - 1
+                OpenAltTabWithSteps(steps)
+                Sleep, 100
+                CommitAltTab()
+            }
+        }
+    }
+    LB_DownInTL := false
 return
 
-*Ctrl Up::
-SendEvent, {Ctrl up}
+ExecuteTLSingleClick:
+    if (tlClickCount = 1)  ; Still single click
+    {
+        InstantSwitchRecent()
+    }
+return
+#If
+
+; Click anywhere when Alt-Tab is pinned to commit selection
+#If (IsAltTabActive() && altTabPinned && !IsInTopLeft())
+
+*LButton::
+    CommitAltTab()
+return
+#If
+
+; ------------------------ BL corner click actions ---------------------
+#If (IsInBottomLeft() && !ShouldHandleLeftChord())
+
+*LButton::
+    LB_DownInBL := true
 return
 
-; ---------- Safety ----------
+*LButton Up::
+    if (LB_DownInBL && IsInBottomLeft())
+    {
+        if (IsAltTabActive())
+            CloseAltTabSwitcher()
+        SendEvent #{Tab}  ; Task View
+    }
+    LB_DownInBL := false
+return
+#If
+
+; ============================ INITIALIZATION ============================
+CreateOverlays()
+
+; ============================ SAFETY & CLEANUP =========================
 OnExit, Cleanup
-
 Cleanup:
-    SendEvent, {Blind}{Alt up}
-    if (tlHoverVisible)
-        ShowTLHover(false, false)
-    if (blHoverVisible)
-        ShowBLHover(false)
-ExitApp
+    SendEvent {Alt up}
+    SendEvent {Ctrl up}
+    SendEvent {Shift up}
+    SendEvent {RButton up}
+    SendEvent {LButton up}
+    if (tlHoverHwnd)
+        Gui, tlHover: Destroy
+    if (blHoverHwnd)
+        Gui, blHover: Destroy
+    ExitApp
+return
+
+; ============================ EMERGENCY RESTART ========================
+; Ctrl + Alt + Shift + R  => restart cleanly
+^!+r::
+    ForceReleaseMods()
+    Reload
+    Sleep, 1000
+    ExitApp
+return
