@@ -29,7 +29,12 @@ Edit values at the top of the script:
 - **Hover** → yellow box
 - **Scroll Up** → next app
 - **Scroll Down** → previous app
-- **Left Click** → switch to last app
+-  **Left-Click (multi-click supported):**
+    - **1× click** → switch to previous app  
+    - **2× clicks** → switch to 2nd most recent app  
+    - **3× clicks** → switch to 3rd most recent app  
+      *(and so on)*
+
 - **Right Click** → maximize/minimize window
 
 ### 🔽 Bottom-Left (Task View)
