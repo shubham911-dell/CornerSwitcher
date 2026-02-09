@@ -49,3 +49,6 @@ Edit values at the top of the script:
    **OR**
   
     → Click `ctrl` `shift` `esc` and search for <ins>***AutoHotKey 64-bit***</ins> and ****Right click**** on it and click ****End task****
+
+## License
+- This project is released under the MIT License.
